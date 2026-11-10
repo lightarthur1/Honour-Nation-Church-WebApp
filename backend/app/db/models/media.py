@@ -48,6 +48,7 @@ class EditedArchive(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     drive_file_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     drive_download_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     event = relationship("Event", back_populates="edited_archive")

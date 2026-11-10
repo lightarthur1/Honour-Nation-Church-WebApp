@@ -16,7 +16,11 @@ log = logging.getLogger("pipeline")
 
 
 def edited_tmp_path(event_id: int) -> Path:
-    return settings.edited_tmp_dir / f"event_{event_id}.zip"
+    return storage_service.edited_archive_path(event_id)
+
+
+def edited_storage_path(event_id: int, archive: EditedArchive) -> Path | str:
+    return archive.storage_key or storage_service.edited_archive_path(event_id)
 
 
 def run_pipeline(event_id: int) -> None:
@@ -25,6 +29,10 @@ def run_pipeline(event_id: int) -> None:
         archive = db.query(EditedArchive).filter_by(event_id=event_id).one()
         zip_path = edited_tmp_path(event_id)
         try:
+            if not zip_path.is_file():
+                storage_service.copy_to_local(
+                    edited_storage_path(event_id, archive), zip_path,
+                )
             _make_previews(db, event_id, zip_path, archive)
             _push_to_drive(db, event_id, zip_path, archive)
         except (zip_service.UnsafeZip, zipfile.BadZipFile) as e:
@@ -46,7 +54,12 @@ def run_drive_sync(event_id: int) -> None:
         archive.status, archive.error = EditedStatus.processing, ""
         db.commit()
         try:
-            _push_to_drive(db, event_id, edited_tmp_path(event_id), archive)
+            zip_path = edited_tmp_path(event_id)
+            if not zip_path.is_file():
+                storage_service.copy_to_local(
+                    edited_storage_path(event_id, archive), zip_path,
+                )
+            _push_to_drive(db, event_id, zip_path, archive)
         except drive_service.DriveError as e:
             _fail(db, archive, f"Drive sync failed: {e}")
         except Exception as e:  # noqa: BLE001
@@ -72,12 +85,13 @@ def _make_previews(db, event_id: int, zip_path: Path, archive: EditedArchive) ->
             try:
                 raw = zf.read(m.info)  # bounded by MAX_UNCOMPRESSED check above
                 prev = preview_service.make_preview(raw)
-                storage_service.edited_image_path(event_id, m.safe_name).write_bytes(raw)
             except Exception as e:  # noqa: BLE001 - skip corrupt images, keep going
                 log.warning("Skipping %s: %s", m.safe_name, e)
                 continue
             dest = out_dir / f"{i:05d}.jpg"
-            dest.write_bytes(prev.data)
+            original_path = storage_service.edited_image_path(event_id, m.safe_name)
+            storage_service.store_bytes(raw, original_path)
+            storage_service.store_bytes(prev.data, dest)
             db.add(PreviewImage(
                 event_id=event_id, file_name=m.safe_name,
                 relative_path=storage_service.rel(dest),
@@ -98,7 +112,11 @@ def _push_to_drive(db, event_id: int, zip_path: Path, archive: EditedArchive) ->
     archive.drive_download_url = result.download_url
     archive.status, archive.error = EditedStatus.synced, ""
     db.commit()
-    zip_path.unlink(missing_ok=True)  # Drive now holds the master copy
+    zip_path.unlink(missing_ok=True)
+    try:
+        storage_service.delete(edited_storage_path(event_id, archive))
+    except storage_service.StorageError:
+        log.exception("Could not remove edited ZIP backup for event %s after Drive sync", event_id)
 
 
 def _fail(db, archive: EditedArchive, message: str) -> None:

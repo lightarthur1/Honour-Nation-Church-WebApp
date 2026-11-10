@@ -1,6 +1,5 @@
 import io
 import logging
-import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -12,6 +11,7 @@ from app.core.config import settings
 from app.core.deps import get_db, require_role
 from app.db.models import Event, PreviewImage, ProgramEvent, ProgramEventStatus, Role, User
 from app.schemas.api import ProgramEventIn, ProgramEventOut
+from app.services import storage_service
 
 router = APIRouter(prefix="/api/program-events", tags=["program-events"])
 log = logging.getLogger("program_events")
@@ -153,8 +153,13 @@ async def upload_event_poster(
             filename = f"program-event-{event_id}-{uuid4().hex}.webp"
             destination = settings.event_posters_dir / filename
             temporary = destination.with_suffix(".tmp")
-            image.save(temporary, format="WEBP", quality=84, method=6)
-            os.replace(temporary, destination)
+            try:
+                image.save(temporary, format="WEBP", quality=84, method=6)
+                storage_service.store_file(temporary, destination, remove_source=True)
+            except storage_service.StorageError as exc:
+                raise HTTPException(502, "Could not save event poster to media storage") from exc
+            finally:
+                temporary.unlink(missing_ok=True)
     except HTTPException:
         raise
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
@@ -164,10 +169,18 @@ async def upload_event_poster(
     previous_filename = event.poster_filename
     event.poster_filename = filename
     event.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        storage_service.delete(destination)
+        raise
     db.refresh(event)
     if previous_filename:
-        (settings.event_posters_dir / previous_filename).unlink(missing_ok=True)
+        try:
+            storage_service.delete(settings.event_posters_dir / previous_filename)
+        except storage_service.StorageError:
+            log.exception("Could not remove replaced poster %s", previous_filename)
     return event
 
 
@@ -179,7 +192,7 @@ def delete_event_poster(
 ):
     event = _event_or_404(db, event_id)
     if event.poster_filename:
-        (settings.event_posters_dir / event.poster_filename).unlink(missing_ok=True)
+        storage_service.delete(settings.event_posters_dir / event.poster_filename)
         event.poster_filename = None
         event.updated_at = datetime.now(timezone.utc)
         db.commit()
@@ -194,7 +207,7 @@ def delete_program_event(
 ):
     event = _event_or_404(db, event_id)
     if event.poster_filename:
-        (settings.event_posters_dir / event.poster_filename).unlink(missing_ok=True)
+        storage_service.delete(settings.event_posters_dir / event.poster_filename)
     db.delete(event)
     db.commit()
     return Response(status_code=204)

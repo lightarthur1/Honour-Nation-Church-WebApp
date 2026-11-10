@@ -33,7 +33,7 @@ def ensure_event_originals(event_id: int, filenames: set[str], *,
         missing = {}
         for filename in filenames:
             path = storage_service.edited_image_path(event_id, filename)
-            if not path.is_file():
+            if not storage_service.exists(path):
                 missing[filename] = path
         if not missing:
             return
@@ -70,6 +70,7 @@ def ensure_event_originals(event_id: int, filenames: set[str], *,
                             with zf.open(member.info) as source:
                                 shutil.copyfileobj(source, image_file, length=1024 * 1024)
                         temporary_image.replace(destination)
+                        storage_service.store_file(destination, destination, remove_source=True)
                     finally:
                         if temporary_image:
                             temporary_image.unlink(missing_ok=True)
@@ -80,7 +81,7 @@ def ensure_event_originals(event_id: int, filenames: set[str], *,
             raise OriginalsUnavailable("The stored edited archive is not a valid ZIP file") from e
         except zip_service.UnsafeZip as e:
             raise OriginalsUnavailable(str(e)) from e
-        except (drive_service.DriveError, HttpError, OSError) as e:
+        except (drive_service.DriveError, HttpError, OSError, storage_service.StorageError) as e:
             raise OriginalsStorageError("Could not retrieve full-resolution originals from storage") from e
         finally:
             if temporary_archive:

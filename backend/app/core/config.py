@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     MFA_TOKEN_MINUTES: int = 5
     DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'gallery.db'}"
     STORAGE_DIR: Path = BASE_DIR / "storage"
+    MEDIA_STORAGE_BACKEND: str = "local"
+    R2_ENDPOINT_URL: str = ""
+    R2_BUCKET_NAME: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
     CORS_ORIGINS: str = "http://localhost:5173"
     REQUIRE_ADMIN_2FA: bool = False
 
@@ -83,6 +88,23 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if settings.MEDIA_STORAGE_BACKEND not in {"local", "r2"}:
+    raise ValueError("MEDIA_STORAGE_BACKEND must be 'local' or 'r2'")
+if settings.MEDIA_STORAGE_BACKEND == "r2":
+    missing_r2_settings = [
+        name for name in (
+            "R2_ENDPOINT_URL",
+            "R2_BUCKET_NAME",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+        )
+        if not getattr(settings, name)
+    ]
+    if missing_r2_settings:
+        raise ValueError(
+            "R2 storage is enabled but these settings are missing: "
+            + ", ".join(missing_r2_settings)
+        )
 for d in (settings.raw_dir, settings.edited_tmp_dir, settings.edited_images_dir, settings.previews_dir,
           settings.event_posters_dir, settings.documents_dir):
     d.mkdir(parents=True, exist_ok=True)

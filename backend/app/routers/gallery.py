@@ -2,7 +2,6 @@ import logging
 import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, get_optional_user, get_user_via_query_token
@@ -105,7 +104,7 @@ def download_original_image(
         raise HTTPException(409, "Full-resolution images are not available yet")
 
     image_path = storage_service.edited_image_path(event_id, image.file_name)
-    if not image_path.is_file():
+    if not storage_service.exists(image_path):
         try:
             originals_service.ensure_event_originals(
                 event_id,
@@ -118,11 +117,12 @@ def download_original_image(
         except originals_service.OriginalsStorageError as e:
             raise HTTPException(502, "Could not retrieve the original image from storage") from e
 
-    if not image_path.is_file():
-        raise HTTPException(404, "Full-resolution image is missing")
     media_type = mimetypes.guess_type(image.file_name)[0] or "application/octet-stream"
-    return FileResponse(
-        image_path,
-        media_type=media_type,
-        filename=storage_service.safe_filename(image.file_name),
-    )
+    try:
+        return storage_service.response_for_file(
+            image_path, media_type, filename=storage_service.safe_filename(image.file_name),
+        )
+    except FileNotFoundError as ex:
+        raise HTTPException(404, "Full-resolution image is missing") from ex
+    except storage_service.StorageError as ex:
+        raise HTTPException(502, "Could not retrieve the original image from storage") from ex

@@ -1,8 +1,8 @@
 # Smart Church Media Gallery
 
-React + Tailwind frontend, FastAPI + SQLite backend. The database stores metadata only
-(names, roles, statuses, Drive IDs/URLs). Image bytes live on disk (raw ZIPs, full-resolution
-edited originals, and <300 KB previews) or as edited ZIPs in Google Drive.
+React + Tailwind frontend, FastAPI backend. SQLite and local media storage are used for development;
+hosted deployments use PostgreSQL and private Cloudflare R2 object storage.
+The database stores metadata only (names, roles, statuses, Drive IDs/URLs, and media object keys).
 
 ## Run it
 
@@ -28,8 +28,45 @@ are indexed in the background after startup, and new galleries are indexed as ne
 Search is available while indexing continues, with progress shown in the gallery.
 
 First login uses BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD from `.env`. Change that password.
-`STORAGE_DIR` defaults to `backend/storage`; keep it on persistent storage because it contains raw uploads,
-full-resolution edited images, and previews.
+`STORAGE_DIR` defaults to `backend/storage`. In local development, it contains uploads and generated media.
+In hosted deployments, durable media is stored in the configured R2 bucket; local disk is used only for
+temporary upload and processing work.
+
+## Database hosting
+Local development uses SQLite by default. For a hosted deployment, set `ENV=production` and set
+`DATABASE_URL` to the PostgreSQL connection URL supplied by the hosting provider. The backend requires
+PostgreSQL in production to avoid silently using an ephemeral SQLite database. The PostgreSQL driver
+is installed from `backend/requirements.txt`.
+
+Production also requires private R2 object storage. Create a private R2 bucket and an S3-compatible API
+token with access to that bucket, then configure these backend environment variables in the hosting
+provider (never commit their values):
+
+- `MEDIA_STORAGE_BACKEND=r2`
+- `R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`
+- `R2_BUCKET_NAME=<bucket-name>`
+- `R2_ACCESS_KEY_ID=<R2 access key>`
+- `R2_SECRET_ACCESS_KEY=<R2 secret>`
+
+The backend proxies media through its API; do not make the bucket public. Public previews and event
+posters are served by the app, while original downloads continue to require the existing approval check.
+Raw ZIPs, edited images, previews, PDFs, posters, and edited ZIPs awaiting Google Drive sync are stored
+in R2. When Google Drive is enabled, the edited ZIP staging copy is removed from R2 after its Drive sync
+succeeds. If Drive is disabled, its development stand-in is also stored in R2 so it survives restarts.
+Temporary processing files and the CLIP model cache remain on local disk and may need to be recreated
+after a server restart.
+
+Back up PostgreSQL and R2 independently. R2 is the durable media store; deleting objects from a bucket
+is not equivalent to keeping a backup.
+
+To preserve an existing local installation, back up `backend/gallery.db` and `backend/storage`, stop the
+local app, create the hosted PostgreSQL database and private R2 bucket, and run
+`python scripts/migrate_local_data.py` from `backend` before starting the deployed backend. Provide the
+hosted `DATABASE_URL`, `MEDIA_STORAGE_BACKEND=r2`, and R2 credentials as environment variables to that
+one-time command; never put credentials in the repository. The migration refuses a non-empty target
+database, copies application records and media (but not the rebuildable CLIP model cache), and keeps the
+local originals untouched. If the local database or storage folder is elsewhere, set
+`MIGRATION_SOURCE_DB` and/or `MIGRATION_SOURCE_STORAGE_DIR`.
 
 ## Lifecycle
 1. Admin creates an event, uploads the raw ZIP, assigns an Editor.
@@ -80,7 +117,9 @@ service schedule. Phone, email, and social contact links are omitted until the c
 official details.
 
 ## Google Drive (free Gmail, OAuth)
-`DRIVE_ENABLED=false` (default) keeps the "Drive" copy in `backend/storage/drive_mock`.
+`DRIVE_ENABLED=false` (default) keeps the "Drive" copy in `backend/storage/drive_mock` locally or in the
+private R2 bucket when R2 storage is enabled. This stand-in is for development; configure Google Drive
+before relying on its cross-service backup.
 To go live, as the church's Google account:
 1. Google Cloud project -> enable Google Drive API.
 2. OAuth consent screen: External, add the church Gmail as a test user, then Publish app (so the token does not expire after 7 days).

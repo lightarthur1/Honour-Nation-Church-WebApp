@@ -1,11 +1,9 @@
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
-from fastapi.responses import FileResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -48,9 +46,8 @@ async def _store_pdf(file: UploadFile) -> tuple[str, str, int]:
     if Path(original_filename).suffix.lower() != ".pdf":
         raise HTTPException(415, "Only PDF documents are supported")
 
-    storage_filename = f"document-{uuid4().hex}.pdf"
-    temporary_path = settings.documents_dir / f"{storage_filename}.upload"
-    final_path = settings.documents_dir / storage_filename
+    storage_filename = f"documents/document-{uuid4().hex}.pdf"
+    temporary_path = settings.documents_dir / f"document-{uuid4().hex}.pdf.upload"
     size_bytes = 0
     header = bytearray()
 
@@ -66,19 +63,22 @@ async def _store_pdf(file: UploadFile) -> tuple[str, str, int]:
 
         if b"%PDF-" not in header:
             raise HTTPException(400, "The uploaded file is not a valid PDF")
-        os.replace(temporary_path, final_path)
+        from app.services import storage_service
+
+        try:
+            storage_service.store_file(temporary_path, storage_filename, remove_source=True)
+        except storage_service.StorageError as exc:
+            raise HTTPException(502, "Could not save document to media storage") from exc
     finally:
         temporary_path.unlink(missing_ok=True)
 
     return original_filename, storage_filename, size_bytes
 
 
-def _document_file(document: ChurchDocument) -> Path:
-    path = settings.documents_dir / document.storage_filename
-    if not path.is_file():
-        log.error("Stored document file is missing for document %s", document.id)
-        raise HTTPException(404, "Document file is unavailable")
-    return path
+def _document_target(document: ChurchDocument) -> Path | str:
+    if "/" in document.storage_filename or "\\" in document.storage_filename:
+        return document.storage_filename
+    return settings.documents_dir / document.storage_filename
 
 
 @router.get("", response_model=list[DocumentOut])
@@ -122,7 +122,12 @@ async def create_document(
         db.refresh(document)
     except SQLAlchemyError:
         db.rollback()
-        (settings.documents_dir / storage_filename).unlink(missing_ok=True)
+        from app.services import storage_service
+
+        try:
+            storage_service.delete(storage_filename)
+        except storage_service.StorageError:
+            log.exception("Could not remove uploaded document after metadata save failed")
         log.exception("Could not save uploaded document metadata")
         raise
     return document
@@ -166,12 +171,21 @@ async def replace_document_file(
         db.refresh(document)
     except SQLAlchemyError:
         db.rollback()
-        (settings.documents_dir / storage_filename).unlink(missing_ok=True)
+        from app.services import storage_service
+
+        try:
+            storage_service.delete(storage_filename)
+        except storage_service.StorageError:
+            log.exception("Could not remove replacement document after metadata save failed")
         log.exception("Could not replace document file")
         raise
     try:
-        (settings.documents_dir / previous_filename).unlink(missing_ok=True)
-    except OSError:
+        from app.services import storage_service
+
+        storage_service.delete(
+            previous_filename if "/" in previous_filename else settings.documents_dir / previous_filename
+        )
+    except storage_service.StorageError:
         log.exception("Could not remove replaced document file %s", previous_filename)
     return document
 
@@ -181,12 +195,19 @@ def download_document(document_id: int, db: Session = Depends(get_db)):
     document = _document_or_404(db, document_id)
     if document.status != DocumentStatus.published:
         raise HTTPException(404, "Document not found")
-    return FileResponse(
-        _document_file(document),
-        media_type="application/pdf",
-        filename=document.original_filename,
-        content_disposition_type="attachment",
-    )
+    from app.services import storage_service
+
+    try:
+        return storage_service.response_for_file(
+            _document_target(document),
+            "application/pdf",
+            filename=document.original_filename,
+        )
+    except FileNotFoundError as exc:
+        log.error("Stored document file is missing for document %s", document.id)
+        raise HTTPException(404, "Document file is unavailable") from exc
+    except storage_service.StorageError as exc:
+        raise HTTPException(502, "Could not retrieve document from media storage") from exc
 
 
 @router.delete("/{document_id}", status_code=204)
@@ -196,12 +217,13 @@ def delete_document(
     _: User = Depends(require_role(Role.admin)),
 ):
     document = _document_or_404(db, document_id)
-    stored_path = settings.documents_dir / document.storage_filename
+    from app.services import storage_service
+
     db.delete(document)
     db.commit()
     try:
-        stored_path.unlink(missing_ok=True)
-    except OSError as exc:
+        storage_service.delete(_document_target(document))
+    except storage_service.StorageError as exc:
         log.exception("Document record %s was deleted but its file could not be removed", document_id)
         raise HTTPException(500, "Document was removed, but its stored file could not be cleaned up") from exc
     return Response(status_code=204)

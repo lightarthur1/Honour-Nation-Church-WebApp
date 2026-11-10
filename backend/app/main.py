@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi import HTTPException
 
 from app.core.config import settings
 from app.core.db_migration import ensure_columns
@@ -13,17 +13,22 @@ from app.db.models import EditedArchive, EditedStatus, Role, User
 from app.db.session import Base, SessionLocal, engine
 from app.routers import announcements, access_requests, auth, documents, events, gallery, notices, program_events, stream_items, uploads, users
 from app.services.visual_search import start_indexing
+from app.services import storage_service
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(engine)
-    ensure_columns()
     if settings.ENV == "production":
+        if engine.dialect.name != "postgresql":
+            raise RuntimeError("DATABASE_URL must use PostgreSQL in production")
+        if settings.MEDIA_STORAGE_BACKEND != "r2":
+            raise RuntimeError("MEDIA_STORAGE_BACKEND must be 'r2' in production")
         if len(settings.SECRET_KEY) < 32 or settings.SECRET_KEY == "dev-only-change-me":
             raise RuntimeError("SECRET_KEY is not configured for production")
         if settings.BOOTSTRAP_ADMIN_PASSWORD == "ChangeMe123!":
             raise RuntimeError("Bootstrap admin password must be changed in production")
+    Base.metadata.create_all(engine)
+    ensure_columns(engine)
     db = SessionLocal()
     try:
         if not db.query(User).first():
@@ -62,8 +67,32 @@ for r in (auth.router, users.router, events.router, uploads.router, gallery.rout
           announcements.router, program_events.router, stream_items.router, notices.router, documents.router):
     app.include_router(r)
 
-app.mount("/previews", StaticFiles(directory=settings.previews_dir), name="previews")
-app.mount("/event-posters", StaticFiles(directory=settings.event_posters_dir), name="event-posters")
+@app.get("/previews/{file_path:path}")
+def preview_file(file_path: str):
+    try:
+        return storage_service.response_for_file(
+            f"previews/{file_path}", "image/jpeg", disposition="inline",
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Preview not found") from exc
+    except storage_service.InvalidStorageKey as exc:
+        raise HTTPException(404, "Preview not found") from exc
+    except storage_service.StorageError as exc:
+        raise HTTPException(502, "Could not retrieve preview from media storage") from exc
+
+
+@app.get("/event-posters/{filename}")
+def event_poster(filename: str):
+    try:
+        return storage_service.response_for_file(
+            f"event_posters/{filename}", "image/webp", disposition="inline",
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Event poster not found") from exc
+    except storage_service.InvalidStorageKey as exc:
+        raise HTTPException(404, "Event poster not found") from exc
+    except storage_service.StorageError as exc:
+        raise HTTPException(502, "Could not retrieve event poster from media storage") from exc
 
 
 @app.get("/api/health")

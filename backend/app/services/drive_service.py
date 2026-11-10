@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterator
 
 from app.core.config import BASE_DIR, settings
+from app.services import storage_service
 
 log = logging.getLogger("drive")
 PROGRESS: dict[int, int] = {}  # event_id -> % of the Drive upload (in memory)
@@ -111,8 +112,11 @@ def check_connection() -> dict[str, bool | str | None]:
 
 def upload_zip(local_path: Path, drive_name: str, event_id: int) -> DriveResult:
     if not settings.DRIVE_ENABLED:
-        MOCK_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(local_path, MOCK_DIR / f"event_{event_id}.zip")
+        if settings.MEDIA_STORAGE_BACKEND == "r2":
+            storage_service.store_file(local_path, f"drive_mock/event_{event_id}.zip")
+        else:
+            MOCK_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(local_path, MOCK_DIR / f"event_{event_id}.zip")
         return DriveResult(f"mock-event-{event_id}", f"mock://event_{event_id}")
 
     from googleapiclient.errors import HttpError
@@ -151,6 +155,9 @@ def upload_zip(local_path: Path, drive_name: str, event_id: int) -> DriveResult:
 def stream_file(file_id: str, event_id: int) -> Iterator[bytes]:
     """Yield the stored ZIP in chunks so large files never sit fully in memory."""
     if not settings.DRIVE_ENABLED:
+        if settings.MEDIA_STORAGE_BACKEND == "r2":
+            yield from storage_service.iter_file(f"drive_mock/event_{event_id}.zip")
+            return
         with open(MOCK_DIR / f"event_{event_id}.zip", "rb") as f:
             while chunk := f.read(1024 * 1024):
                 yield chunk

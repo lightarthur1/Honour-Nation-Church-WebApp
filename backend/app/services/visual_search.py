@@ -124,10 +124,9 @@ def _index_worker() -> None:
 
             image_bytes = []
             for row in rows:
-                path = storage_service.abs_path(row.relative_path)
-                if not path.is_file():
+                if not storage_service.exists(row.relative_path):
                     raise VisualSearchError(f"Preview file for image {row.id} is missing.")
-                image_bytes.append(path.read_bytes())
+                image_bytes.append(storage_service.read_bytes(row.relative_path))
 
             embeddings = _encode_images(image_bytes)
             for row, embedding in zip(rows, embeddings):

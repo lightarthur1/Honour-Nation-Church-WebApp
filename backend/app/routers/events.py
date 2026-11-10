@@ -71,6 +71,7 @@ def delete_event(event_id: int, db: Session = Depends(get_db),
     storage_service.remove_tree(settings.previews_dir / str(e.id))
     storage_service.remove_tree(settings.raw_dir / str(e.id))
     storage_service.remove_tree(settings.edited_images_dir / str(e.id))
-    (settings.edited_tmp_dir / f"event_{e.id}.zip").unlink(missing_ok=True)
+    storage_service.delete(storage_service.edited_archive_path(e.id))
+    storage_service.remove_tree(settings.edited_tmp_dir / str(e.id))
     db.delete(e)
     db.commit()
