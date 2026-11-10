@@ -1,0 +1,23 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+**/credentials/
+
+# Python
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/*.py[cod]
+
+# Local databases and uploaded/generated media
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+backend/storage/
+backend/test_store/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
